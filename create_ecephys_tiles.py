@@ -1,8 +1,5 @@
 import os
-import time
 import json
-from turtle import down
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
@@ -22,6 +19,8 @@ from spikeinterface.preprocessing import (
 import lindi
 
 import fsspec
+
+from BufferedStore import BufferedStore
 
 compression = "gzip"
 compression_opts = 3
@@ -79,101 +78,15 @@ def write_status_file(store, status_data):
         raise ValueError(f"Unsupported store type: {type(store)}")
 
 
-def process_segment(
-    *,
-    traces: np.ndarray,
-    start_sample: int,
-    segment_size: int,
-    tiles_grp,
-    num_levels: int,
-    downsampling_base: int,
-    sampling_frequency: float,
-    num_channels: int,
-):
-    """Process a single segment of data."""
-    prev_traces_min = None
-    prev_traces_max = None
-    prev_spike_counts = None
-
-    for level in range(num_levels):
-        print(
-            f"Processing level {level}, Start time {start_sample / sampling_frequency:.3f} sec"
-        )
-        i1 = start_sample // (downsampling_base**level)
-        i2 = (start_sample + segment_size) // (downsampling_base**level)
-        ds = tiles_grp[f"level_{level}/data"]
-        ds_spike_counts = tiles_grp[f"level_{level}/spike_counts"]
-        if level == 0:
-            ds[i1:i2, :] = traces.astype(np.int16)
-            prev_traces_min = traces
-            prev_traces_max = traces
-            print(
-                f"Detecting peaks for level {level}, Start time {start_sample / sampling_frequency:.3f} sec"
-            )
-            peaks = detect_peaks(
-                traces=traces,
-                detect_threshold=5,
-                exclude_sweep_ms=1,
-                sampling_frequency=sampling_frequency,
-            )
-            print(f"Found {len(peaks)} peaks")
-            spike_counts = np.zeros(
-                (segment_size, num_channels), dtype=np.int32
-            )
-            for peak in peaks:
-                sample_index = peak[0] + start_sample
-                channel_index = peak[1]
-                if start_sample <= sample_index < start_sample + segment_size:
-                    spike_counts[sample_index - start_sample, channel_index] += 1
-            ds_spike_counts[i1:i2, :] = spike_counts.astype(np.uint16)
-            prev_spike_counts = spike_counts
-        else:
-            assert prev_traces_min is not None and prev_traces_max is not None
-            assert prev_spike_counts is not None
-            traces_min_for_downsampling = prev_traces_min.reshape(
-                (
-                    prev_traces_min.shape[0] // downsampling_base,
-                    downsampling_base,
-                    num_channels,
-                )
-            )
-            traces_max_for_downsampling = prev_traces_max.reshape(
-                (
-                    prev_traces_max.shape[0] // downsampling_base,
-                    downsampling_base,
-                    num_channels,
-                )
-            )
-            prev_traces_min = np.min(traces_min_for_downsampling, axis=1)
-            prev_traces_max = np.max(traces_max_for_downsampling, axis=1)
-            ds[i1:i2, :] = np.stack(
-                (
-                    prev_traces_min.astype(np.int16),
-                    prev_traces_max.astype(np.int16),
-                ),
-                axis=1,
-            ).astype(np.int16)
-            spike_counts_for_downsampling = prev_spike_counts.reshape(
-                (
-                    prev_spike_counts.shape[0] // downsampling_base,
-                    downsampling_base,
-                    num_channels,
-                )
-            )
-            prev_spike_counts = np.sum(spike_counts_for_downsampling, axis=1)
-            ds_spike_counts[i1:i2, :] = prev_spike_counts.astype(np.uint16)
-
-
 def create_ecephys_tiles(
     *,
     input_url: str,
     electrical_series_path: str,
-    store,
+    store: BufferedStore | zarr.storage.Store,
     chunk_size: tuple[int, int],
     downsampling_base: int,
     read_status_func,
     write_status_func,
-    num_parallel_segments: int = 4,
 ):
     freq_min = 300
     freq_max = 6000
@@ -258,7 +171,9 @@ def create_ecephys_tiles(
         num_samples_in_level //= downsampling_base
 
     print("Consolidating metadata")
-    consolidate_metadata(store)
+    consolidate_metadata(store) # type: ignore
+    if isinstance(store, BufferedStore):
+        store.flush()
 
     segment_size = chunk_size[0]
     # we need to make sure that segment_size is divisible by downsampling_base**num_levels
@@ -277,67 +192,90 @@ def create_ecephys_tiles(
         start_sample = 0
     else:
         start_sample = last_start_sample + segment_size
-
-    # Process segments in parallel batches
     while start_sample + segment_size <= R.get_num_samples():
-        # Collect segments for parallel processing
-        segments_to_process = []
-        batch_start_sample = start_sample
-
-        for i in range(num_parallel_segments):
-            if start_sample + segment_size <= R.get_num_samples():
-                segments_to_process.append(start_sample)
-                start_sample += segment_size
-            else:
-                break
-
-        if not segments_to_process:
-            break
-
-        print(f"Processing {len(segments_to_process)} segments in parallel")
-
-        # Load traces serially to avoid lindi thread safety issues
-        print(f'Reading traces for {len(segments_to_process)} segments')
-        segment_traces = []
-        for segment_start in segments_to_process:
-            traces = R.get_traces(
-                start_frame=segment_start,
-                end_frame=segment_start + segment_size,
+        print(f'Reading traces')
+        traces = R.get_traces(
+            start_frame=start_sample,
+            end_frame=start_sample + segment_size,
+        )
+        prev_traces_min = None
+        prev_traces_max = None
+        prev_spike_counts = None
+        for level in range(num_levels):
+            print(
+                f"Processing level {level}, Start time {start_sample / R.get_sampling_frequency():.3f} sec"
             )
-            segment_traces.append((segment_start, traces))
-
-        # Process segments in parallel
-        print(f'Starting parallel processing of {len(segment_traces)} segments')
-        with ThreadPoolExecutor(max_workers=num_parallel_segments) as executor:
-            futures = []
-            for segment_start, traces in segment_traces:
-                future = executor.submit(
-                    process_segment,
-                    traces=traces,
-                    start_sample=segment_start,
-                    segment_size=segment_size,
-                    tiles_grp=tiles_grp,
-                    num_levels=num_levels,
-                    downsampling_base=downsampling_base,
-                    sampling_frequency=R.get_sampling_frequency(),
-                    num_channels=R.get_num_channels(),
+            i1 = start_sample // (downsampling_base**level)
+            i2 = (start_sample + segment_size) // (downsampling_base**level)
+            ds = tiles_grp[f"level_{level}/data"]
+            ds_spike_counts = tiles_grp[f"level_{level}/spike_counts"]
+            if level == 0:
+                ds[i1:i2, :] = traces.astype(np.int16)
+                prev_traces_min = traces
+                prev_traces_max = traces
+                print(
+                    f"Detecting peaks for level {level}, Start time {start_sample / R.get_sampling_frequency():.3f} sec"
                 )
-                futures.append(future)
+                peaks = detect_peaks(
+                    traces=traces,
+                    detect_threshold=5,
+                    exclude_sweep_ms=1,
+                    sampling_frequency=R.get_sampling_frequency(),
+                )
+                print(f"Found {len(peaks)} peaks")
+                spike_counts = np.zeros(
+                    (segment_size, R.get_num_channels()), dtype=np.int32
+                )
+                for peak in peaks:
+                    sample_index = peak[0] + start_sample
+                    channel_index = peak[1]
+                    if start_sample <= sample_index < start_sample + segment_size:
+                        spike_counts[sample_index - start_sample, channel_index] += 1
+                ds_spike_counts[i1:i2, :] = spike_counts.astype(np.uint16)
+                prev_spike_counts = spike_counts
+            else:
+                assert prev_traces_min is not None and prev_traces_max is not None
+                assert prev_spike_counts is not None
+                traces_min_for_downsampling = prev_traces_min.reshape(
+                    (
+                        prev_traces_min.shape[0] // downsampling_base,
+                        downsampling_base,
+                        R.get_num_channels(),
+                    )
+                )
+                traces_max_for_downsampling = prev_traces_max.reshape(
+                    (
+                        prev_traces_max.shape[0] // downsampling_base,
+                        downsampling_base,
+                        R.get_num_channels(),
+                    )
+                )
+                prev_traces_min = np.min(traces_min_for_downsampling, axis=1)
+                prev_traces_max = np.max(traces_max_for_downsampling, axis=1)
+                ds[i1:i2, :] = np.stack(
+                    (
+                        prev_traces_min.astype(np.int16),
+                        prev_traces_max.astype(np.int16),
+                    ),
+                    axis=1,
+                ).astype(np.int16)
+                spike_counts_for_downsampling = prev_spike_counts.reshape(
+                    (
+                        prev_spike_counts.shape[0] // downsampling_base,
+                        downsampling_base,
+                        R.get_num_channels(),
+                    )
+                )
+                prev_spike_counts = np.sum(spike_counts_for_downsampling, axis=1)
+                ds_spike_counts[i1:i2, :] = prev_spike_counts.astype(np.uint16)
+        if isinstance(store, BufferedStore):
+            print(f'Flushing store')
+            store.flush()
 
-            # Wait for all segments to complete
-            for future in as_completed(futures):
-                try:
-                    future.result()  # This will raise any exceptions that occurred
-                except Exception as e:
-                    print(f"Error processing segment: {e}")
-                    raise
-
-        # Update status after processing all segments in this batch
-        # Use the last segment's start sample as the new last_start_sample
-        last_processed_sample = segments_to_process[-1]
-        status_data = {"last_start_sample": last_processed_sample}
+        # Write status to JSON file so we can pick off where we left off
+        status_data = {"last_start_sample": start_sample}
         write_status_func(status_data)
-        print(f"Completed batch, updated status to sample {last_processed_sample}")
+        start_sample += segment_size
 
 
 def values_match(value1, value2):
@@ -464,10 +402,7 @@ if __name__ == "__main__":
         )
         s3_path = f'neurosift-tiles/dandisets/{dandiset_id}/{asset_id}/tiles.zarr'
         store = s3fs.S3Map(root=s3_path, s3=fs, check=False)
-        store = zarr.storage.LRUStoreCache(
-            store=store,
-            max_size=50 * 2**20,  # 50 MB
-        )
+        store = BufferedStore(store, max_workers=12)
 
         # Create status file functions using S3 filesystem directly
         status_file_path = s3_path + '.status.json'
@@ -497,11 +432,12 @@ if __name__ == "__main__":
             downsampling_base=4,
             read_status_func=read_status_func,
             write_status_func=write_status_func,
-            num_parallel_segments=12
         )
     # catch keyboard interrupt to allow graceful exit
     except KeyboardInterrupt:
         print("Interrupted by user, consolidating metadata and exiting...")
         consolidate_metadata(store)  # type: ignore
+        if isinstance(store, BufferedStore):
+            store.flush() # type: ignore
         print("Metadata consolidated, exiting.")
         raise
