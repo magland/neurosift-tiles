@@ -365,13 +365,15 @@ def detect_peaks(
 
 if __name__ == "__main__":
     # 000409
-    # nwb_url = "https://api.dandiarchive.org/api/assets/c04f6b30-82bf-40e1-9210-34f0bcd8be24/download/"
-    # electrical_series_path = "/acquisition/ElectricalSeriesAp"
+    # https://neurosift.app/nwb?url=https://api.dandiarchive.org/api/assets/c04f6b30-82bf-40e1-9210-34f0bcd8be24/download/&dandisetId=000409
+    dandiset_id = "000409"
+    nwb_url = "https://api.dandiarchive.org/api/assets/c04f6b30-82bf-40e1-9210-34f0bcd8be24/download/"
+    electrical_series_path = "/acquisition/ElectricalSeriesAp"
 
-    # https://neurosift.app/nwb?url=https://api.dandiarchive.org/api/assets/d4bd92fc-4119-4393-b807-f007a86778a1/download/&dandisetId=000957&dandisetVersion=draft
-    dandiset_id = "000957"
-    nwb_url = "https://api.dandiarchive.org/api/assets/d4bd92fc-4119-4393-b807-f007a86778a1/download/"
-    electrical_series_path = "/acquisition/ElectricalSeriesAP"
+    # # https://neurosift.app/nwb?url=https://api.dandiarchive.org/api/assets/d4bd92fc-4119-4393-b807-f007a86778a1/download/&dandisetId=000957&dandisetVersion=draft
+    # dandiset_id = "000957"
+    # nwb_url = "https://api.dandiarchive.org/api/assets/d4bd92fc-4119-4393-b807-f007a86778a1/download/"
+    # electrical_series_path = "/acquisition/ElectricalSeriesAP"
 
     assert nwb_url.split("/")[-2] == "download", "URL must end with 'download/'"
     asset_id = nwb_url.split("/")[-3]
