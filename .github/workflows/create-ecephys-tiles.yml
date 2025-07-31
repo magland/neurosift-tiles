@@ -25,6 +25,7 @@ jobs:
         pip install fsspec
         pip install lindi
         pip install spikeinterface
+        pip install scipy
 
     - name: Run create ecephys tiles script
       env:
