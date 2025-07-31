@@ -358,43 +358,58 @@ if __name__ == "__main__":
     nwb_url = "https://api.dandiarchive.org/api/assets/d4bd92fc-4119-4393-b807-f007a86778a1/download/"
     electrical_series_path = "/acquisition/ElectricalSeriesAP"
 
-    # output_path = "000957_example.ns.zarr"
-    # store = zarr.DirectoryStore(output_path)
-
     assert nwb_url.split("/")[-2] == "download", "URL must end with 'download/'"
     asset_id = nwb_url.split("/")[-3]
 
-    fs = s3fs.S3FileSystem(
-        anon=False,
-        key=os.environ['NEUROSIFT_TILES_AWS_ACCESS_KEY_ID'],
-        secret=os.environ['NEUROSIFT_TILES_AWS_SECRET_ACCESS_KEY'],
-        client_kwargs={
-            "endpoint_url": os.environ['NEUROSIFT_TILES_S3_ENDPOINT'],
-            "region_name": "auto"
-        }
-    )
-    s3_path = f'neurosift-tiles/dandisets/{dandiset_id}/{asset_id}/tiles.zarr'
-    store = s3fs.S3Map(root=s3_path, s3=fs, check=False)
-    store = zarr.storage.LRUStoreCache(
-        store=store,
-        max_size=50 * 2**20,  # 50 MB
-    )
+    local = False
+    if local:
+        output_path = "000957_example.ns.zarr"
+        store = zarr.DirectoryStore(output_path)
+        status_file_path = output_path + ".status.json"
+        # Create status file functions using local file system
+        def read_status_func():
+            """Read status file from local file system."""
+            if os.path.exists(status_file_path):
+                with open(status_file_path, 'r') as f:
+                    return json.load(f)
+            else:
+                return {}
+        def write_status_func(status_data):
+            """Write status file to local file system."""
+            with open(status_file_path, 'w') as f:
+                json.dump(status_data, f, indent=2)
+    else:
+        fs = s3fs.S3FileSystem(
+            anon=False,
+            key=os.environ['NEUROSIFT_TILES_AWS_ACCESS_KEY_ID'],
+            secret=os.environ['NEUROSIFT_TILES_AWS_SECRET_ACCESS_KEY'],
+            client_kwargs={
+                "endpoint_url": os.environ['NEUROSIFT_TILES_S3_ENDPOINT'],
+                "region_name": "auto"
+            }
+        )
+        s3_path = f'neurosift-tiles/dandisets/{dandiset_id}/{asset_id}/tiles.zarr'
+        store = s3fs.S3Map(root=s3_path, s3=fs, check=False)
+        store = zarr.storage.LRUStoreCache(
+            store=store,
+            max_size=50 * 2**20,  # 50 MB
+        )
 
-    # Create status file functions using S3 filesystem directly
-    status_file_path = s3_path + '.status.json'
+        # Create status file functions using S3 filesystem directly
+        status_file_path = s3_path + '.status.json'
 
-    def read_status_func():
-        """Read status file using S3 filesystem directly."""
-        if fs.exists(status_file_path):
-            with fs.open(status_file_path, 'r') as f:
-                return json.load(f)
-        else:
-            return {}
+        def read_status_func():
+            """Read status file using S3 filesystem directly."""
+            if fs.exists(status_file_path):
+                with fs.open(status_file_path, 'r') as f:
+                    return json.load(f)
+            else:
+                return {}
 
-    def write_status_func(status_data):
-        """Write status file using S3 filesystem directly."""
-        with fs.open(status_file_path, 'w') as f:
-            json.dump(status_data, f, indent=2)
+        def write_status_func(status_data):
+            """Write status file using S3 filesystem directly."""
+            with fs.open(status_file_path, 'w') as f:
+                json.dump(status_data, f, indent=2)
 
     try:
         create_ecephys_tiles(

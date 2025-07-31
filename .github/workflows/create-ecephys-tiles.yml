@@ -1,0 +1,35 @@
+name: Create Ecephys Tiles
+
+on:
+  workflow_dispatch:
+
+jobs:
+  create-tiles:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install numpy
+        pip install "zarr<3"
+        pip install s3fs
+        pip install fsspec
+        pip install lindi
+        pip install spikeinterface
+
+    - name: Run create ecephys tiles script
+      env:
+        NEUROSIFT_TILES_AWS_ACCESS_KEY_ID: ${{ secrets.NEUROSIFT_TILES_AWS_ACCESS_KEY_ID }}
+        NEUROSIFT_TILES_AWS_SECRET_ACCESS_KEY: ${{ secrets.NEUROSIFT_TILES_AWS_SECRET_ACCESS_KEY }}
+        NEUROSIFT_TILES_S3_ENDPOINT: ${{ secrets.NEUROSIFT_TILES_S3_ENDPOINT }}
+      run: |
+        python create_ecephys_tiles.py
