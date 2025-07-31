@@ -270,6 +270,9 @@ def create_ecephys_tiles(
                 ds_spike_counts[i1:i2, :] = prev_spike_counts.astype(np.uint16)
         if isinstance(store, BufferedStore):
             print(f'Flushing store')
+            if store.cache_size_bytes() > 100_000_000:  # 100 MB
+                # The cache really speeds things up, but can grow large.
+                store.clear_cache_on_next_flush()
             store.flush()
 
         # Write status to JSON file so we can pick off where we left off

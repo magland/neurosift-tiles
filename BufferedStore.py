@@ -62,7 +62,6 @@ class BufferedStore(MutableMapping):
         *,
         max_workers: Optional[int] = None,
         executor: Optional[ThreadPoolExecutor] = None,
-        clear_cache_on_flush: bool = True,
     ) -> None:
         self._store: MutableMapping[str, bytes] = base_store
         self._cache: Dict[str, Any] = {}          # key → bytes | _TOMBSTONE
@@ -71,7 +70,7 @@ class BufferedStore(MutableMapping):
         self._external_executor = executor
         self._max_workers = max_workers
         self._closed = False
-        self._clear_cache_on_flush = clear_cache_on_flush
+        self._clear_cache_on_next_flush = False   # flag for cache clearing
 
     # --------------------------------------------------------------------- #
     # MutableMapping interface                                              #
@@ -201,9 +200,10 @@ class BufferedStore(MutableMapping):
                 # else: keep cached copy for future reads
                 self._dirty.discard(key)
 
-        if self._clear_cache_on_flush:
-            with self._lock:
+            # Clear cache if requested
+            if self._clear_cache_on_next_flush:
                 self._cache.clear()
+                self._clear_cache_on_next_flush = False
 
     # Aliases
     sync = flush
@@ -216,6 +216,33 @@ class BufferedStore(MutableMapping):
         """Return a *copy* of the set of keys awaiting flush."""
         with self._lock:
             return set(self._dirty)
+
+    def cache_size_bytes(self) -> int:
+        """
+        Return the total size of cached data in bytes.
+
+        Returns
+        -------
+        int
+            Total bytes used by all cached values (excluding tombstones).
+        """
+        with self._lock:
+            total_bytes = 0
+            for value in self._cache.values():
+                if value is not _TOMBSTONE and isinstance(value, bytes):
+                    total_bytes += len(value)
+            return total_bytes
+
+    def clear_cache_on_next_flush(self) -> None:
+        """
+        Mark the cache to be cleared after the next flush operation.
+
+        This is useful when the cache has grown too large and needs to be
+        cleared, but you want to wait until after the next flush to ensure
+        all pending writes are safely committed first.
+        """
+        with self._lock:
+            self._clear_cache_on_next_flush = True
 
     def close(self) -> None:
         """Flush and mark the store closed.  Further ops raise ValueError."""
