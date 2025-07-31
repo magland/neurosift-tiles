@@ -175,6 +175,9 @@ def create_ecephys_tiles(
     segment_size = chunk_size[0]
     while segment_size < downsampling_base**num_levels:
         segment_size *= downsampling_base
+    # Let's do at least 10 seconds at a time
+    while segment_size < R.get_sampling_frequency() * 10:
+        segment_size *= 2
 
     # Read status from JSON file, with fallback to zarr attributes for backward compatibility
     status_data = read_status_func()
