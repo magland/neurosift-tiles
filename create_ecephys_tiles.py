@@ -363,24 +363,19 @@ def detect_peaks(
     return list(map(tuple, np.argwhere(peak_mask)))
 
 
-if __name__ == "__main__":
-    # 000409
-    # https://neurosift.app/nwb?url=https://api.dandiarchive.org/api/assets/c04f6b30-82bf-40e1-9210-34f0bcd8be24/download/&dandisetId=000409
-    dandiset_id = "000409"
-    nwb_url = "https://api.dandiarchive.org/api/assets/c04f6b30-82bf-40e1-9210-34f0bcd8be24/download/"
-    electrical_series_path = "/acquisition/ElectricalSeriesAp"
-
-    # # https://neurosift.app/nwb?url=https://api.dandiarchive.org/api/assets/d4bd92fc-4119-4393-b807-f007a86778a1/download/&dandisetId=000957&dandisetVersion=draft
-    # dandiset_id = "000957"
-    # nwb_url = "https://api.dandiarchive.org/api/assets/d4bd92fc-4119-4393-b807-f007a86778a1/download/"
-    # electrical_series_path = "/acquisition/ElectricalSeriesAP"
-
+def process_dataset(dataset_config, local=False):
+    """Process a single dataset from the catalog."""
+    dandiset_id = dataset_config["dandiset_id"]
+    asset_id = dataset_config["asset_id"]
+    nwb_url = dataset_config["nwb_url"]
+    electrical_series_path = dataset_config["electrical_series_path"]
+    
+    print(f"Processing dataset {dandiset_id} (asset: {asset_id})")
+    
     assert nwb_url.split("/")[-2] == "download", "URL must end with 'download/'"
-    asset_id = nwb_url.split("/")[-3]
-
-    local = False
+    
     if local:
-        output_path = "000957_example.ns.zarr"
+        output_path = f"{dandiset_id}_{asset_id}.ns.zarr"
         store = zarr.DirectoryStore(output_path)
         status_file_path = output_path + ".status.json"
         # Create status file functions using local file system
@@ -438,6 +433,8 @@ if __name__ == "__main__":
             read_status_func=read_status_func,
             write_status_func=write_status_func,
         )
+        print(f"Successfully processed dataset {dandiset_id}")
+        return True
     # catch keyboard interrupt to allow graceful exit
     except KeyboardInterrupt:
         print("Interrupted by user, consolidating metadata and exiting...")
@@ -446,3 +443,55 @@ if __name__ == "__main__":
             store.flush() # type: ignore
         print("Metadata consolidated, exiting.")
         raise
+    except Exception as e:
+        print(f"Error processing dataset {dandiset_id}: {e}")
+        return False
+
+
+def load_catalog(catalog_path="ecephys_catalog.json"):
+    """Load the ecephys datasets catalog."""
+    with open(catalog_path, 'r') as f:
+        catalog = json.load(f)
+    return catalog
+
+
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Process ecephys datasets for neurosift tiles")
+    parser.add_argument("--catalog", default="ecephys_catalog.json", 
+                       help="Path to the catalog JSON file")
+    parser.add_argument("--local", action="store_true", 
+                       help="Use local storage instead of S3")
+    parser.add_argument("--dataset", type=str, 
+                       help="Process only a specific dataset by dandiset_id")
+    
+    args = parser.parse_args()
+    
+    # Load catalog
+    catalog = load_catalog(args.catalog)
+    datasets = catalog["datasets"]
+    
+    # Filter to specific dataset if requested
+    if args.dataset:
+        datasets = [d for d in datasets if d["dandiset_id"] == args.dataset]
+        if not datasets:
+            print(f"Dataset {args.dataset} not found in catalog")
+            exit(1)
+    
+    print(f"Processing {len(datasets)} dataset(s)")
+    
+    # Process each dataset
+    success_count = 0
+    for dataset in datasets:
+        try:
+            if process_dataset(dataset, local=args.local):
+                success_count += 1
+        except KeyboardInterrupt:
+            print("Processing interrupted by user")
+            break
+        except Exception as e:
+            print(f"Unexpected error processing dataset {dataset['dandiset_id']}: {e}")
+            continue
+    
+    print(f"Successfully processed {success_count}/{len(datasets)} datasets")
